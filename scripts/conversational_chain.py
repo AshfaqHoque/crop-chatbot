@@ -7,19 +7,36 @@ from langchain_core.messages import HumanMessage, AIMessage
 PERSIST_DIR = "chroma_db"
 COLLECTION_NAME = "crops"
 
-RELEVANCE_THRESHOLD = 0.4
+RELEVANCE_THRESHOLD = 0.3
 NO_INFO_MESSAGE = "I don't have information about that in the crop knowledge base."
 
-SYSTEM_PROMPT = """You are a helpful assistant that answers questions about crop
-cultivation using ONLY the information given in the context below. The context
-may be in Bangla or English.
-
-Rules:
-- Answer in the same language the user asked in.
-- Be concise and practical — this is for farmers, not an essay.
-
-Context:
+SYSTEM_PROMPT = """You are a strict closed-book assistant. The CONTEXT below is
+your ONLY source of truth. You have no other knowledge about crops.
+ 
+CONTEXT:
 {context}
+ 
+ABSOLUTE RULES:
+1. Every number, date, quantity, pest/disease name, or method in your answer
+   must come directly from the CONTEXT above (translated if needed) — never
+   from what you already know about farming in general.
+2. If the user asks about something the CONTEXT does not cover (a specific
+   number, a growing month, a pest, anything), say plainly: "The knowledge
+   base doesn't specify that" for that part. Do NOT estimate, calculate, or
+   supply a plausible-sounding value to fill the gap.
+3. Before writing your final answer, check every number and named detail you
+   are about to include against the CONTEXT. If you cannot point to where in
+   the CONTEXT it came from, delete it.
+4. The CONTEXT may contain information about MULTIPLE different crops (each
+   chunk is labeled with its crop name in brackets, e.g. "[Aman Rice / আমন
+   ধান]"). Never combine or transfer a fact from one crop to another, even if
+   their names look or sound similar (e.g. Aman rice vs Aam/mango are
+   different crops). Only use facts labeled with the crop the user asked about.
+5. Answer in the same language the user asked in.
+6. Be concise. Summarize the key actionable points from the CONTEXT in your
+   own words — do not copy long passages verbatim. Cover the most important
+   points across ALL relevant retrieved sections (not just one), but keep the
+   total answer under ~120 words, using short bullets.
 """
 
 CONTEXTUALIZE_PROMPT = """Given the conversation so far and a new user question,
@@ -39,7 +56,7 @@ def build_pipeline():
         embedding_function=embeddings,
         persist_directory=PERSIST_DIR,
     )
-    llm = ChatOllama(model="llama3.2:3b", temperature=0)
+    llm = ChatOllama(model="qwen2.5:7b-instruct", temperature=0)
 
     contextualize_prompt = ChatPromptTemplate.from_messages([
         ("system", CONTEXTUALIZE_PROMPT),
@@ -50,7 +67,7 @@ def build_pipeline():
 
     answer_prompt = ChatPromptTemplate.from_messages([
         ("system", SYSTEM_PROMPT),
-        MessagesPlaceholder("history"),
+        # MessagesPlaceholder("history"),
         ("human", "{question}")
     ])
     generation_chain = answer_prompt | llm | StrOutputParser()
@@ -77,8 +94,8 @@ def answer(question: str, history: list, vectorstore, contextualize_chain, gener
     print("===================\n")
     reply =  generation_chain.invoke({
         "context": format_docs(docs), 
-        "history": history,
-        "question": question
+        # "history": history,
+        "question": standalone_question
     })
     return reply
 
