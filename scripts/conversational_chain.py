@@ -4,6 +4,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_community.retrievers import BM25Retriever
+from sentence_transformers import CrossEncoder
 
 PERSIST_DIR = "chroma_db"
 COLLECTION_NAME = "crops"
@@ -71,6 +72,9 @@ def build_pipeline():
     stored = vectorstore.get(include=["documents", "metadatas"])
     bm25_retriever = BM25Retriever(stored["documents"], metadatas=stored["metadatas"])
     bm25_retriever.k = 4
+    reranker = CrossEncoder(
+        "cross-encoder/ms-marco-MiniLM-L6-v2"
+    )
     
     llm = ChatOllama(model="qwen2.5:7b-instruct", temperature=0)
 
@@ -87,14 +91,33 @@ def build_pipeline():
     ])
     generation_chain = answer_prompt | llm | StrOutputParser()
 
-    return vectorstore, bm25_retriever, contextualize_chain, generation_chain
+    return vectorstore, bm25_retriever, reranker, contextualize_chain, generation_chain
 
-def answer(question: str, history: list, vectorstore, bm25_retriever, contextualize_chain, generation_chain, k: int=4):
+def reciprocal_rank_fusion(vector_docs, bm25_docs, k = 4):
+    scores = {}
+    doc_map = {}
+
+    for docs in [vector_docs, bm25_docs]:
+        for rank, doc in enumerate(docs, start=1):
+            key = doc.page_content
+
+            doc_map[key] = doc
+            scores[key] = scores.get(key, 0) + 1 / (60 + rank)
+
+    ranked_keys = sorted(
+        scores,
+        key=scores.get,
+        reverse=True,
+    )
+
+    return [doc_map[key] for key in ranked_keys[:k]]
+
+def answer(question: str, history: list, vectorstore, bm25_retriever, reranker, contextualize_chain, generation_chain, k: int=4):
     if history:
         standalone_question = contextualize_chain.invoke({"history": history, "question":question})
     else:
         standalone_question = question
-    print(f"[standalone question] {standalone_question}")
+    print(f"[standalone question] {standalone_question}")        
     # ? vector search
     docs_with_scores = vectorstore.similarity_search_with_relevance_scores(standalone_question, k=k)
 
@@ -105,13 +128,7 @@ def answer(question: str, history: list, vectorstore, bm25_retriever, contextual
     vector_docs = [d for d,score in docs_with_scores]
     bm25_docs = bm25_retriever.invoke(standalone_question)
 
-    combined_docs = []
-
-    for doc in vector_docs + bm25_docs:
-        if doc.page_content not in [d.page_content for d in combined_docs]:
-            combined_docs.append(doc)
-
-    docs = combined_docs[:4]
+    docs = reciprocal_rank_fusion(vector_docs, bm25_docs, k=k)
 
     print("\n===== VECTOR =====")
     for doc, score in docs_with_scores:
@@ -128,7 +145,7 @@ def answer(question: str, history: list, vectorstore, bm25_retriever, contextual
     return reply
 
 if __name__ == "__main__": 
-    vectorstore, bm25_retriever, contextualize_chain, generation_chain = build_pipeline()
+    vectorstore, bm25_retriever, reranker, contextualize_chain, generation_chain = build_pipeline()
     history = []
     while True:
         question = input("You: ").strip()
@@ -136,7 +153,7 @@ if __name__ == "__main__":
             break
         if not question:
             continue
-        reply = answer(question, history, vectorstore, bm25_retriever, contextualize_chain, generation_chain)
+        reply = answer(question, history, vectorstore, bm25_retriever, reranker, contextualize_chain, generation_chain)
         print(f"\nBot: {reply}\n")
 
         history.append(HumanMessage(content=question))
