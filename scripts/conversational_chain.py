@@ -62,6 +62,39 @@ def format_docs(docs) -> str:
         for doc in docs
     )
 
+def rerank_documents(question, docs, reranker, k=4):
+    if not docs:
+        return []
+
+    pairs = [
+        [
+            question,
+            f"{doc.metadata.get('crop_name', '')} "
+            f"{doc.metadata.get('section', '')} "
+            f"{doc.page_content}",
+        ]
+        for doc in docs
+    ]
+
+    scores = reranker.predict(pairs)
+
+    ranked_docs = sorted(
+        zip(docs, scores),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+
+    print("\n===== RERANKED =====")
+
+    for doc, score in ranked_docs:
+        print(
+            f"{float(score):.3f} | "
+            f"{doc.metadata.get('crop_name')} "
+            f"({doc.metadata.get('section')})"
+        )
+
+    return [doc for doc, _ in ranked_docs[:k]]
+
 def build_pipeline():
     embeddings = OllamaEmbeddings(model="bge-m3")
     vectorstore = Chroma(
@@ -70,8 +103,21 @@ def build_pipeline():
         persist_directory=PERSIST_DIR,
     )
     stored = vectorstore.get(include=["documents", "metadatas"])
-    bm25_retriever = BM25Retriever(stored["documents"], metadatas=stored["metadatas"])
-    bm25_retriever.k = 4
+    bm25_texts = [
+        f"{metadata.get('crop_name', '')} "
+        f"{metadata.get('section', '')} "
+        f"{text}"
+        for text, metadata in zip(
+            stored["documents"],
+            stored["metadatas"],
+        )
+    ]
+    bm25_retriever = BM25Retriever.from_texts(
+        bm25_texts,
+        metadatas=stored["metadatas"],
+    )
+
+    bm25_retriever.k = 10
     reranker = CrossEncoder(
         "cross-encoder/ms-marco-MiniLM-L6-v2"
     )
@@ -128,7 +174,18 @@ def answer(question: str, history: list, vectorstore, bm25_retriever, reranker, 
     vector_docs = [d for d,score in docs_with_scores]
     bm25_docs = bm25_retriever.invoke(standalone_question)
 
-    docs = reciprocal_rank_fusion(vector_docs, bm25_docs, k=k)
+    candidate_docs = reciprocal_rank_fusion(
+        vector_docs,
+        bm25_docs,
+        k=10,
+    )
+
+    docs = rerank_documents(
+        standalone_question,
+        candidate_docs,
+        reranker,
+        k=4,
+    )
 
     print("\n===== VECTOR =====")
     for doc, score in docs_with_scores:
@@ -137,9 +194,14 @@ def answer(question: str, history: list, vectorstore, bm25_retriever, reranker, 
     print("\n===== BM25 =====")
     for i, doc in enumerate(bm25_docs, 1):
         print(f"{i}. {doc.metadata['crop_name']} ({doc.metadata['section']})")
-        
+    
+    context = format_docs(docs)
+    print("\n===== FINAL CONTEXT =====")
+    print(context)
+    print("=========================\n")
+    
     reply =  generation_chain.invoke({
-        "context": format_docs(docs), 
+        "context": context, 
         "question": standalone_question
     })
     return reply
