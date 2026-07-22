@@ -4,7 +4,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_community.retrievers import BM25Retriever
-from sentence_transformers import CrossEncoder
 
 PERSIST_DIR = "chroma_db"
 COLLECTION_NAME = "crops"
@@ -62,39 +61,6 @@ def format_docs(docs) -> str:
         for doc in docs
     )
 
-def rerank_documents(question, docs, reranker, k=4):
-    if not docs:
-        return []
-
-    pairs = [
-        [
-            question,
-            f"{doc.metadata.get('crop_name', '')} "
-            f"{doc.metadata.get('section', '')} "
-            f"{doc.page_content}",
-        ]
-        for doc in docs
-    ]
-
-    scores = reranker.predict(pairs)
-
-    ranked_docs = sorted(
-        zip(docs, scores),
-        key=lambda item: item[1],
-        reverse=True,
-    )
-
-    print("\n===== RERANKED =====")
-
-    for doc, score in ranked_docs:
-        print(
-            f"{float(score):.3f} | "
-            f"{doc.metadata.get('crop_name')} "
-            f"({doc.metadata.get('section')})"
-        )
-
-    return [doc for doc, _ in ranked_docs[:k]]
-
 def build_pipeline():
     embeddings = OllamaEmbeddings(model="bge-m3")
     vectorstore = Chroma(
@@ -104,25 +70,23 @@ def build_pipeline():
     )
     stored = vectorstore.get(include=["documents", "metadatas"])
     bm25_texts = [
-        f"{metadata.get('crop_name', '')} "
-        f"{metadata.get('section', '')} "
-        f"{text}"
-        for text, metadata in zip(
+    f"{metadata.get('crop_name', '')} "
+    f"{metadata.get('section', '')} "
+    f"{text}"
+    for text, metadata in zip(
             stored["documents"],
             stored["metadatas"],
         )
     ]
+
     bm25_retriever = BM25Retriever.from_texts(
         bm25_texts,
         metadatas=stored["metadatas"],
     )
 
-    bm25_retriever.k = 10
-    reranker = CrossEncoder(
-        "cross-encoder/ms-marco-MiniLM-L6-v2"
-    )
+    bm25_retriever.k = 4
     
-    llm = ChatOllama(model="qwen2.5:7b-instruct", temperature=0)
+    llm = ChatOllama(model="qwen2.5:7b-instruct", num_ctx=8192, num_predict=512, temperature=0)
 
     contextualize_prompt = ChatPromptTemplate.from_messages([
         ("system", CONTEXTUALIZE_PROMPT),
@@ -137,7 +101,7 @@ def build_pipeline():
     ])
     generation_chain = answer_prompt | llm | StrOutputParser()
 
-    return vectorstore, bm25_retriever, reranker, contextualize_chain, generation_chain
+    return vectorstore, bm25_retriever, contextualize_chain, generation_chain
 
 def reciprocal_rank_fusion(vector_docs, bm25_docs, k = 4):
     scores = {}
@@ -158,56 +122,44 @@ def reciprocal_rank_fusion(vector_docs, bm25_docs, k = 4):
 
     return [doc_map[key] for key in ranked_keys[:k]]
 
-def answer(question: str, history: list, vectorstore, bm25_retriever, reranker, contextualize_chain, generation_chain, k: int=4):
+def answer(question: str, history: list, vectorstore, bm25_retriever, contextualize_chain, generation_chain, k: int=2):
     if history:
         standalone_question = contextualize_chain.invoke({"history": history, "question":question})
     else:
         standalone_question = question
     print(f"[standalone question] {standalone_question}")        
-    # ? vector search
+    
     docs_with_scores = vectorstore.similarity_search_with_relevance_scores(standalone_question, k=k)
 
-    # top_score = max((s for _,s in docs_with_scores), default=0)
-    # if top_score < RELEVANCE_THRESHOLD:
-    #     return NO_INFO_MESSAGE
+    top_score = max((s for _,s in docs_with_scores), default=0)
+    if top_score < RELEVANCE_THRESHOLD:
+        return NO_INFO_MESSAGE, standalone_question
     
     vector_docs = [d for d,score in docs_with_scores]
-    bm25_docs = bm25_retriever.invoke(standalone_question)
+    # bm25_docs = bm25_retriever.invoke(standalone_question)
 
-    candidate_docs = reciprocal_rank_fusion(
-        vector_docs,
-        bm25_docs,
-        k=10,
-    )
-
-    docs = rerank_documents(
-        standalone_question,
-        candidate_docs,
-        reranker,
-        k=4,
-    )
+    # docs = reciprocal_rank_fusion(vector_docs, bm25_docs, k=k)
 
     print("\n===== VECTOR =====")
     for doc, score in docs_with_scores:
         print(f"{score:.3f} | {doc.metadata['crop_name']} ({doc.metadata['section']})")
 
-    print("\n===== BM25 =====")
-    for i, doc in enumerate(bm25_docs, 1):
-        print(f"{i}. {doc.metadata['crop_name']} ({doc.metadata['section']})")
+    # print("\n===== BM25 =====")
+    # for i, doc in enumerate(bm25_docs, 1):
+    #     print(f"{i}. {doc.metadata['crop_name']} ({doc.metadata['section']})")
     
-    context = format_docs(docs)
-    print("\n===== FINAL CONTEXT =====")
+    context = format_docs(vector_docs)
+    print("\n===== CONTEXT =====")
     print(context)
-    print("=========================\n")
     
     reply =  generation_chain.invoke({
         "context": context, 
         "question": standalone_question
     })
-    return reply
+    return reply, standalone_question
 
 if __name__ == "__main__": 
-    vectorstore, bm25_retriever, reranker, contextualize_chain, generation_chain = build_pipeline()
+    vectorstore, bm25_retriever, contextualize_chain, generation_chain = build_pipeline()
     history = []
     while True:
         question = input("You: ").strip()
@@ -215,11 +167,13 @@ if __name__ == "__main__":
             break
         if not question:
             continue
-        reply = answer(question, history, vectorstore, bm25_retriever, reranker, contextualize_chain, generation_chain)
+        reply, standalone_question = answer(question, history, vectorstore, bm25_retriever, contextualize_chain, generation_chain)
         print(f"\nBot: {reply}\n")
 
-        history.append(HumanMessage(content=question))
+        history.append(HumanMessage(content=standalone_question))
         history.append(AIMessage(content=reply))
+        history = history[-2:]
+        print("history: ", history)
 
 
 

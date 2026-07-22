@@ -74,15 +74,60 @@ def crop_to_documents(crop: dict) -> list[dict]:
             parts.append(clean_html(v["special_character"]))
         add(" | ".join(parts), "variety", extra={"variety_name": vname})
 
-    # 4. each pesticide/herbicide entry -> its own document
+    # 4. Each pesticide/herbicide entry -> its own document
     for p in crop.get("pesticide") or []:
-        text = f"Problem: {p.get('disease_name', '')}. Control: {clean_html(p.get('control_measure'))}"
-        add(text, "pesticide", extra={"disease_name": p.get("disease_name")})
+        if p.get("is_deleted"):
+            continue
+
+        chemicals = "; ".join(
+            f"Trade Name: {c.get('trade_name', '')}. "
+            f"Generic Name: {c.get('generic_name', '')}. "
+            f"Application Guide: {clean_html(c.get('application_guide'))}"
+            for c in p.get("chemical") or []
+            if not c.get("is_deleted")
+        )
+
+        text = (
+            f"Problem: {p.get('disease_name', '')}. "
+            f"Description and damage: {clean_html(p.get('damage_control'))}. "
+            f"Control: {clean_html(p.get('control_measure'))}."
+        )
+
+        if chemicals:
+            text += f" Chemicals: {chemicals}"
+
+        add(
+            text,
+            "pesticide",
+            extra={"disease_name": p.get("disease_name")},
+        )
 
     for h in crop.get("herbicide") or []:
-        text = f"Target weeds: {h.get('pesticide_name', '')}. Guide: {clean_html(h.get('application_guide'))}"
-        add(text, "herbicide")
+        if h.get("is_deleted"):
+            continue
 
+        dose_unit = (
+            h.get("applicationDoseUnitInfo") or {}
+        ).get("unit_name", "")
+
+        text = (
+            f"Target weeds: {h.get('pesticide_name', '')}. "
+            f"Trade Name: {h.get('trade_name', '')}. "
+            f"Generic Name: {h.get('generic_name', '')}. "
+            f"Application Dose: {h.get('application_dose', '')} {dose_unit}. "
+            f"Application Guide: {clean_html(h.get('application_guide'))}"
+        )
+
+        add(
+            text,
+            "herbicide",
+            extra={
+                "target_weeds": h.get("pesticide_name"),
+                "trade_name": h.get("trade_name"),
+                "generic_name": h.get("generic_name"),
+            },
+        )
+    
     return docs
 
 
