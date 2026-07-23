@@ -22,12 +22,6 @@ def create_app() -> FastAPI:
             "model": settings.ollama_model,
         }
 
-    # NOTE: chat router will be included here in a later step, once
-    # app/api/routes/chat.py and the pipeline behind it exist:
-    #
-    # from app.api.routes.chat import router as chat_router
-    # app.include_router(chat_router, prefix="/chat", tags=["chat"])
-
     return app
 
 

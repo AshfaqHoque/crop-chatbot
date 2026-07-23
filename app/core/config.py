@@ -29,9 +29,9 @@ class Settings(BaseSettings):
     llm_temperature: float = Field(default=0.1)  # low temp: factual crop Q&A, not creative writing
 
     # --- Your existing context retrieval API ---
-    context_api_base_url: str = Field(default="http://localhost:8001")
-    context_api_query_path: str = Field(default="/query")
-    context_api_timeout_seconds: float = Field(default=15.0)
+    context_api_base_url: str = Field(default="https://socket.farminsight.dev")
+    context_api_retrieve_path: str = Field(default="/rag/retrieve")
+    context_api_timeout_seconds: float = Field(default=20.0)
 
     # --- Retrieval / confidence gating ---
     # Below this confidence, we refuse rather than answer from weak context.
